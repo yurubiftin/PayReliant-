@@ -1,0 +1,7 @@
+# Web framework + server
+fastapi
+uvicorn[standard]
+
+# Testing
+pytest
+httpx2
