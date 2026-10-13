@@ -3,14 +3,23 @@
 Each class below becomes one table in PostgreSQL.
 Each `Mapped[...] = mapped_column(...)` line becomes one column.
 
-Step 2 covers CUSTOMER, MERCHANT and WALLET.
-TRANSACTION and LEDGER_ENTRY are added in Step 3.
+Step 2: CUSTOMER, MERCHANT, WALLET
+Step 3: TRANSACTION, LEDGER_ENTRY
 """
 
+from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Numeric, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -48,4 +57,67 @@ class Wallet(Base):
         CheckConstraint("balance >= 0", name="balance_not_negative"),
         CheckConstraint("owner_type IN ('CUSTOMER', 'MERCHANT')", name="valid_owner_type"),
         UniqueConstraint("owner_type", "owner_id", name="one_wallet_per_owner"),
+    )
+
+
+# The states a transaction moves through (proposal section 4.1):
+#   PENDING -> PROCESSING -> SUCCESSFUL
+#                        \-> FAILED
+TRANSACTION_STATES = ("PENDING", "PROCESSING", "SUCCESSFUL", "FAILED")
+
+
+class Transaction(Base):
+    """One payment request from a customer to a merchant."""
+
+    __tablename__ = "transactions"
+
+    transaction_id: Mapped[int] = mapped_column(primary_key=True)
+    # The unique key the client sends with each payment. unique=True means the
+    # database will never store two transactions with the same key.
+    idempotency_key: Mapped[str] = mapped_column(String(100), unique=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.customer_id"))
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.merchant_id"))
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    failure_reason: Mapped[str | None] = mapped_column(String(200), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    ledger_entries: Mapped[list["LedgerEntry"]] = relationship(
+        back_populates="transaction", order_by="LedgerEntry.entry_id"
+    )
+
+    __table_args__ = (
+        CheckConstraint("amount > 0", name="amount_positive"),
+        CheckConstraint(
+            "status IN ('PENDING', 'PROCESSING', 'SUCCESSFUL', 'FAILED')", name="valid_status"
+        ),
+    )
+
+
+class LedgerEntry(Base):
+    """A permanent record of money moving in or out of one wallet.
+
+    Every successful payment creates exactly two entries:
+      DEBIT  on the customer's wallet (money out)
+      CREDIT on the merchant's wallet (money in)
+    So across the whole ledger, total DEBITs always equal total CREDITs.
+    """
+
+    __tablename__ = "ledger_entries"
+
+    entry_id: Mapped[int] = mapped_column(primary_key=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.transaction_id"))
+    wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.wallet_id"))
+    entry_type: Mapped[str] = mapped_column(String(10))  # "DEBIT" or "CREDIT"
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    transaction: Mapped[Transaction] = relationship(back_populates="ledger_entries")
+
+    __table_args__ = (
+        CheckConstraint("amount > 0", name="ledger_amount_positive"),
+        CheckConstraint("entry_type IN ('DEBIT', 'CREDIT')", name="valid_entry_type"),
     )

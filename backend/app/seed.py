@@ -50,7 +50,7 @@ def main() -> None:
         print("Dropped all tables.")
 
     Base.metadata.create_all(engine)  # creates any tables that don't exist yet
-    print("Tables ready: customers, merchants, wallets.")
+    print("Tables ready: customers, merchants, wallets, transactions, ledger_entries.")
 
     with SessionLocal() as db:
         if db.query(Customer).count() > 0:
