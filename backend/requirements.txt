@@ -2,6 +2,11 @@
 fastapi
 uvicorn[standard]
 
+# Database
+sqlalchemy          # talks to the database using Python classes instead of raw SQL
+psycopg[binary]     # the driver that actually connects Python to PostgreSQL
+python-dotenv       # reads settings from the .env file
+
 # Testing
 pytest
 httpx2

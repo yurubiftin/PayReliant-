@@ -43,7 +43,10 @@ python -m venv .venv
 # macOS/Linux:  source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Run the API
+# 3. Create the tables and sample accounts (safe to re-run)
+python -m app.seed
+
+# 4. Run the API
 uvicorn app.main:app --reload
 ```
 
@@ -55,11 +58,12 @@ Open http://localhost:8000/docs for the interactive API docs.
 cd backend
 pytest
 ```
+Docker must be running. Tests use a separate `payreliant_test` database, so they never touch your sandbox data.
 
 ## Build progress
 
 - [x] Step 1 — Project setup, health endpoint, first test
-- [ ] Step 2 — Database connection and models (customers, merchants, wallets)
+- [x] Step 2 — Database connection and models (customers, merchants, wallets)
 - [ ] Step 3 — Payment endpoint with atomic wallet + ledger updates
 - [ ] Step 4 — Transaction states
 - [ ] Step 5 — Idempotency (duplicate prevention)
