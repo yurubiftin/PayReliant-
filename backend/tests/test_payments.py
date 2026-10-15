@@ -97,15 +97,7 @@ def test_missing_idempotency_key_is_rejected(client):
     assert response.status_code == 422
 
 
-# --- Scenario 2 (table 4.6), basic version -------------------------------------
-# Step 5 will upgrade this: a repeated key will return the ORIGINAL result.
-
-def test_reused_key_never_charges_twice(client):
-    pay(client, "same-key", AMINA, MAMA_MBOGA, "500.00")
-    second = pay(client, "same-key", AMINA, MAMA_MBOGA, "500.00")
-
-    assert second.status_code == 409
-    assert balance(client, 1) == Decimal("11950.00")  # charged once, not twice
+# (Repeated keys / retries are tested in test_idempotency.py)
 
 
 # --- The two rules that must ALWAYS hold ---------------------------------------

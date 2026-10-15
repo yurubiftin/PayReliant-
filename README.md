@@ -66,7 +66,7 @@ Docker must be running. Tests use a separate `payreliant_test` database, so they
 - [x] Step 2 — Database connection and models (customers, merchants, wallets)
 - [x] Step 3 — Payment endpoint with atomic wallet + ledger updates
 - [x] Step 4 — Transaction states (PENDING → PROCESSING → SUCCESSFUL / FAILED)
-- [ ] Step 5 — Idempotency (duplicate prevention)
+- [x] Step 5 — Idempotency (retries return the original result, never charge twice)
 - [ ] Step 6 — Concurrency control
 - [ ] Step 7 — USSD simulator
 - [ ] Step 8 — Merchant dashboard
