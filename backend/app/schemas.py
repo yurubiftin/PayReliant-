@@ -37,6 +37,14 @@ class WalletOut(BaseModel):
     balance: Decimal
 
 
+class BalanceOut(BaseModel):
+    """What the USSD 'Check balance' option shows."""
+
+    name: str
+    phone: str
+    balance: Decimal
+
+
 class PaymentRequest(BaseModel):
     """What a client (the USSD simulator, a test) sends to make a payment.
 

@@ -24,6 +24,7 @@ payreliant/
 ├── backend/          FastAPI app and its tests
 │   ├── app/
 │   └── tests/
+├── ussd-simulator/   USSD phone simulator (served by the API at /simulator/)
 ├── dashboard/        React + Vite merchant dashboard (later)
 ├── docs/             Diagrams, test results, report notes
 ├── docker-compose.yml  PostgreSQL + Redis for local development
@@ -52,6 +53,9 @@ uvicorn app.main:app --reload
 
 Open http://localhost:8000/docs for the interactive API docs.
 
+Open http://localhost:8000/simulator/ for the **USSD simulator**: dial `*384#`, pay a merchant,
+and switch the network condition (normal / sent twice / reply lost) to watch idempotency work.
+
 ## Run the tests
 
 ```bash
@@ -78,6 +82,6 @@ and prints a before/after table (lost updates, wallets vs ledger, time).
 - [x] Step 4 — Transaction states (PENDING → PROCESSING → SUCCESSFUL / FAILED)
 - [x] Step 5 — Idempotency (retries return the original result, never charge twice)
 - [x] Step 6 — Concurrency control (row locks; before/after experiment in `backend/experiments/race_demo.py`)
-- [ ] Step 7 — USSD simulator
+- [x] Step 7 — USSD simulator (http://127.0.0.1:8000/simulator/)
 - [ ] Step 8 — Merchant dashboard
 - [ ] Step 9 — Reliability and load tests

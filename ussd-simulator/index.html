@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PayReliant USSD Simulator</title>
+<!--
+  PayReliant USSD Simulator (Step 7)
+
+  A pretend feature phone. It is a CLIENT of the PayReliant API, just like a real
+  USSD gateway would be. It:
+    - walks the customer through a USSD menu (*384# -> pay merchant -> code -> amount -> PIN)
+    - creates a NEW idempotency key when the customer confirms with their PIN
+    - sends POST /payments with that key, and RE-USES the same key for retries
+    - can simulate bad networks: request sent twice, or reply lost then retried
+    - logs every request it sends, so you can see idempotency working
+
+  Served by FastAPI at http://127.0.0.1:8000/simulator/  (same address as the API,
+  so the page can call /payments, /merchants etc. directly).
+-->
+<style>
+  :root {
+    --bg: #F5F6F3; --ink: #12161C; --muted: #555E69; --line: #E2E5E0; --card: #FFFFFF;
+    --navy: #161B26; --navy-2: #2A3245; --green: #1D6B50; --green-bg: #E3F0EA; --green-ink: #17573F;
+    --red-bg: #F6E4E7; --red-ink: #8A1E2F; --amber-bg: #FBF0D9; --amber-ink: #7A4F00;
+    --purple-bg: #ECE8F5; --purple-ink: #4A3A7A; --screen: #E9EEE6;
+    --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 28px 20px 48px; display: flex; flex-direction: column; gap: 20px; }
+  h1 { margin: 0; font-size: 28px; }
+  .sub { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .controls { padding: 14px 18px; display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: flex-end; }
+  label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  select { min-height: 42px; padding: 0 10px; border: 1px solid #CBD0C9; border-radius: 8px; font: inherit; font-size: 14px; color: var(--ink); background: #fff; }
+  .modes { display: flex; flex-wrap: wrap; gap: 8px; }
+  .mode { min-height: 42px; padding: 6px 12px; border-radius: 10px; border: 1px solid #CBD0C9; background: #fff;
+          font: inherit; text-align: left; cursor: pointer; color: var(--ink); }
+  .mode b { display: block; font-size: 14px; }
+  .mode span { font-size: 12px; opacity: .8; }
+  .mode[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .layout { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+
+  /* --- the phone --- */
+  .phone { flex: 0 0 330px; max-width: 100%; background: var(--navy); border-radius: 34px; padding: 18px;
+           display: flex; flex-direction: column; gap: 12px; }
+  .speaker { width: 70px; height: 6px; border-radius: 99px; background: var(--navy-2); align-self: center; }
+  .screen { background: var(--screen); border-radius: 14px; min-height: 230px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .screen .tag { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; color: #4C5560; }
+  .screen .text { font-family: var(--mono); font-size: 15px; line-height: 1.55; white-space: pre-line; flex: 1; margin: 0; }
+  .screen input { font-family: var(--mono); font-size: 16px; min-height: 40px; padding: 0 10px; border: 1px solid #9DA79A; border-radius: 6px; background: #fff; color: var(--ink); }
+  .keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .keys button { min-height: 46px; border: 0; border-radius: 10px; background: var(--navy-2); color: #fff; font: 500 19px var(--mono); cursor: pointer; }
+  .keys button:hover { background: #36405A; }
+  .keys .cancel { background: #5A2030; font: 600 14px "Segoe UI", system-ui, sans-serif; }
+  .keys .send { background: var(--green); font: 600 14px "Segoe UI", system-ui, sans-serif; }
+  .busy { opacity: .6; pointer-events: none; }
+
+  /* --- request log --- */
+  .log { flex: 1 1 420px; min-width: 0; display: flex; flex-direction: column; }
+  .log-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  .log-head h2 { margin: 0; font-size: 16px; }
+  .log-head button { min-height: 34px; padding: 0 12px; border: 1px solid #CBD0C9; border-radius: 8px; background: #fff; font: inherit; font-size: 13px; cursor: pointer; }
+  .empty { padding: 24px 18px; color: var(--muted); font-size: 14px; line-height: 1.6; margin: 0; }
+  .entry { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 12px 18px; border-bottom: 1px solid #EEF0EC; align-items: flex-start; }
+  .entry .time { font-family: var(--mono); font-size: 12px; color: var(--muted); width: 64px; }
+  .entry .body { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .entry .line { font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  .entry .key { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
+  .entry .note { font-size: 13px; color: #3A424C; }
+  .pill { font-family: var(--mono); font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; white-space: nowrap; }
+  .ok { background: var(--green-bg); color: var(--green-ink); }
+  .bad { background: var(--red-bg); color: var(--red-ink); }
+  .warn { background: var(--amber-bg); color: var(--amber-ink); }
+  .dup { background: var(--purple-bg); color: var(--purple-ink); }
+  .foot { font-size: 12px; color: var(--muted); }
+  .foot a { color: var(--green); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>USSD Simulator</h1>
+    <p class="sub">Dial <b>*384#</b>, pay a merchant, and watch the requests this phone sends to the PayReliant API. Sandbox only: no real money.</p>
+  </header>
+
+  <section class="card controls" aria-label="Simulation settings">
+    <label class="field">Simulated customer (phone)
+      <select id="customer"></select>
+    </label>
+    <div class="field" style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">
+      Network condition for the next payment
+      <div class="modes" role="group" aria-label="Network condition">
+        <button type="button" class="mode" data-mode="normal" aria-pressed="true"><b>Normal</b><span>One request, one reply</span></button>
+        <button type="button" class="mode" data-mode="duplicate" aria-pressed="false"><b>Sent twice</b><span>Phone fires the request twice at once</span></button>
+        <button type="button" class="mode" data-mode="timeout" aria-pressed="false"><b>Reply lost</b><span>Server answers, phone never hears it, retries</span></button>
+      </div>
+    </div>
+  </section>
+
+  <div class="layout">
+    <!-- The phone -->
+    <section class="phone" id="phone" aria-label="Phone">
+      <div class="speaker"></div>
+      <div class="screen" role="status" aria-live="polite">
+        <span class="tag" id="screen-tag">DIALLER</span>
+        <p class="text" id="screen-text"></p>
+        <input id="input" aria-label="USSD reply" autocomplete="off">
+      </div>
+      <div class="keys" id="keys"></div>
+      <div class="keys">
+        <button type="button" class="cancel" id="cancel">Cancel</button>
+        <button type="button" id="backspace" aria-label="Delete last character">&#9003;</button>
+        <button type="button" class="send" id="send">Send</button>
+      </div>
+    </section>
+
+    <!-- What the phone sends to the API -->
+    <section class="card log" aria-label="Request log">
+      <div class="log-head">
+        <h2>Requests sent to the API</h2>
+        <button type="button" id="clear-log">Clear</button>
+      </div>
+      <p class="empty" id="empty">No requests yet. Dial <b>*384#</b>, choose <b>1</b>, enter merchant <b>52011</b>, an amount and any 4-digit PIN.</p>
+      <div id="log"></div>
+    </section>
+  </div>
+
+  <p class="foot">Check the results in the API: <a href="/wallets" target="_blank">/wallets</a> · <a href="/transactions" target="_blank">/transactions</a> · <a href="/docs" target="_blank">/docs</a></p>
+</main>
+
+<script>
+/* ------------------------------------------------------------------------------
+   1. State: where the customer is in the USSD menu
+   ------------------------------------------------------------------------------ */
+const state = {
+  step: "dial",        // dial -> menu -> merchant -> amount -> confirm -> result
+  mode: "normal",      // network condition: normal | duplicate | timeout
+  merchantCode: "",
+  amount: "",
+  resultText: "",
+};
+let merchants = [];    // loaded from GET /merchants
+
+const $ = (id) => document.getElementById(id);
+const phoneNumber = () => $("customer").value;
+
+/* ------------------------------------------------------------------------------
+   2. What the screen shows at each step
+   ------------------------------------------------------------------------------ */
+function merchantName(code) {
+  const m = merchants.find((m) => m.business_code === code);
+  return m ? m.name : null;
+}
+
+function render() {
+  const screens = {
+    dial:     ["DIALLER", "Type the short code *384#\nand press Send."],
+    menu:     ["PAYRELIANT", "1. Pay merchant\n2. Check balance"],
+    merchant: ["PAY MERCHANT", "Enter merchant code:\n(try 52011, 52012, 52013)"],
+    amount:   ["PAY MERCHANT", "Enter amount (KES):"],
+    confirm:  ["CONFIRM", `Pay KES ${Number(state.amount).toLocaleString()} to\n${merchantName(state.merchantCode)} (${state.merchantCode})?\n\nEnter your 4-digit PIN:`],
+    result:   ["RESULT", state.resultText + "\n\nPress Send for menu."],
+  };
+  const [tag, text] = screens[state.step];
+  $("screen-tag").textContent = tag;
+  $("screen-text").textContent = text;
+  $("input").type = state.step === "confirm" ? "password" : "text";
+  $("input").focus();
+}
+
+/* ------------------------------------------------------------------------------
+   3. What happens when the customer presses Send
+   ------------------------------------------------------------------------------ */
+async function onSend() {
+  const value = $("input").value.trim();
+  $("input").value = "";
+
+  if (state.step === "dial") {
+    state.step = value === "*384#" ? "menu" : "dial";
+  } else if (state.step === "menu") {
+    if (value === "1") state.step = "merchant";
+    else if (value === "2") { await showBalance(); }
+  } else if (state.step === "merchant") {
+    if (merchantName(value)) { state.merchantCode = value; state.step = "amount"; }
+    else { showResult("Unknown merchant code."); }
+  } else if (state.step === "amount") {
+    if (/^\d+(\.\d{1,2})?$/.test(value) && Number(value) > 0) { state.amount = value; state.step = "confirm"; }
+    else { showResult("Invalid amount."); }
+  } else if (state.step === "confirm") {
+    // Sandbox: any 4 digits are accepted as the PIN (no real PINs are stored).
+    if (/^\d{4}$/.test(value)) { await pay(); }
+    else { showResult("PIN must be 4 digits."); }
+  } else if (state.step === "result") {
+    state.step = "menu";
+  }
+  render();
+}
+
+function showResult(text) {
+  state.resultText = text;
+  state.step = "result";
+}
+
+async function showBalance() {
+  const r = await fetch(`/customers/${phoneNumber()}/balance`);
+  const b = await r.json();
+  showResult(r.ok ? `${b.name}\nBalance: KES ${Number(b.balance).toLocaleString(undefined, {minimumFractionDigits: 2})}` : "Could not get balance.");
+}
+
+/* ------------------------------------------------------------------------------
+   4. Paying: create the idempotency key, send, retry with the SAME key
+   ------------------------------------------------------------------------------ */
+async function pay() {
+  // A NEW key for this payment. Every retry of THIS payment re-uses it.
+  const key = "ussd-" + crypto.randomUUID();
+  const payload = { customer_phone: phoneNumber(), merchant_code: state.merchantCode, amount: state.amount };
+
+  $("phone").classList.add("busy");
+  let final;
+  try {
+    if (state.mode === "normal") {
+      final = await post(key, payload, "POST /payments");
+
+    } else if (state.mode === "duplicate") {
+      // A glitch makes the phone fire the same request twice at the same moment.
+      const [a, b] = await Promise.all([
+        post(key, payload, "POST /payments  (copy 1)"),
+        post(key, payload, "POST /payments  (copy 2)"),
+      ]);
+      final = [a, b].find((r) => r.code !== 409) || a;
+
+    } else if (state.mode === "timeout") {
+      // The server receives and processes the payment, but the reply never reaches the phone.
+      await post(key, payload, "POST /payments", { replyLost: true });
+      await sleep(1500);          // phone waits, hears nothing...
+      final = await post(key, payload, "POST /payments  (retry, same key)");
+    }
+
+    // 409 = "the first request with this key is still being processed": wait and ask again.
+    if (final.code === 409) {
+      await sleep(1000);
+      final = await post(key, payload, "POST /payments  (retry after 409)");
+    }
+  } catch (err) {
+    showResult("Network error. Is the API running?");
+    return;
+  } finally {
+    $("phone").classList.remove("busy");
+  }
+
+  const t = final.body;
+  if (t.status === "SUCCESSFUL") {
+    const bal = await (await fetch(`/customers/${phoneNumber()}/balance`)).json();
+    showResult(`Confirmed. TXN-${t.transaction_id}\nKES ${Number(t.amount).toLocaleString()} paid to\n${merchantName(state.merchantCode)}.\nNew balance: KES ${Number(bal.balance).toLocaleString(undefined, {minimumFractionDigits: 2})}`);
+  } else if (t.status === "FAILED") {
+    showResult(t.failure_reason === "INSUFFICIENT_BALANCE" ? "Payment failed.\nInsufficient balance." : "Payment failed.");
+  } else {
+    showResult("Payment not completed:\n" + (t.detail || "unknown error"));
+  }
+}
+
+/* Send one POST /payments and log it. */
+async function post(key, payload, label, { replyLost = false } = {}) {
+  const r = await fetch("/payments", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+    body: JSON.stringify(payload),
+  });
+  const body = await r.json();
+  const result = { code: r.status, replayed: r.headers.get("Idempotent-Replayed"), body };
+  addLog(label, key, result, replyLost);
+  return result;
+}
+
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+/* ------------------------------------------------------------------------------
+   5. The request log (built with textContent, never innerHTML, so API text can't inject HTML)
+   ------------------------------------------------------------------------------ */
+function addLog(label, key, result, replyLost) {
+  $("empty").hidden = true;
+  const { code, replayed, body } = result;
+
+  let pillText = `${code} ${body.status || ""}`.trim();
+  let pillClass = code === 201 ? "ok" : code === 409 ? "warn" : "bad";
+  let note;
+
+  if (replyLost) {
+    pillText = "REPLY LOST"; pillClass = "warn";
+    note = `Server processed it (TXN-${body.transaction_id}, ${body.status}), but the phone never got this reply.`;
+  } else if (replayed === "true") {
+    pillClass = "dup";
+    pillText = `${code} REPLAYED`;
+    note = `Key already seen: server returned the ORIGINAL result (TXN-${body.transaction_id}). No second charge.`;
+  } else if (code === 201) {
+    note = `New payment TXN-${body.transaction_id}. Customer debited, merchant credited, 2 ledger entries.`;
+  } else if (code === 409) {
+    note = "Same key still being processed. Server says: retry shortly.";
+  } else if (body.status === "FAILED") {
+    note = `Payment FAILED: ${body.failure_reason}. No money moved.`;
+  } else {
+    note = typeof body.detail === "string" ? body.detail : "Request rejected.";
+  }
+
+  const entry = document.createElement("div");
+  entry.className = "entry";
+  const time = el("span", "time", new Date().toLocaleTimeString());
+  const bodyDiv = el("div", "body");
+  bodyDiv.append(el("span", "line", label), el("span", "key", "Idempotency-Key: " + key), el("span", "note", note));
+  const pill = el("span", "pill " + pillClass, pillText);
+  entry.append(time, bodyDiv, pill);
+  $("log").prepend(entry);
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+/* ------------------------------------------------------------------------------
+   6. Wiring up the buttons, and loading customers + merchants from the API
+   ------------------------------------------------------------------------------ */
+function buildKeypad() {
+  for (const k of ["1","2","3","4","5","6","7","8","9","*","0","#"]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = k;
+    b.addEventListener("click", () => { $("input").value += k; $("input").focus(); });
+    $("keys").append(b);
+  }
+}
+
+function resetSession() {
+  Object.assign(state, { step: "dial", merchantCode: "", amount: "", resultText: "" });
+  $("input").value = "*384#";
+  render();
+}
+
+async function init() {
+  buildKeypad();
+  $("send").addEventListener("click", onSend);
+  $("input").addEventListener("keydown", (e) => { if (e.key === "Enter") onSend(); });
+  $("cancel").addEventListener("click", resetSession);
+  $("backspace").addEventListener("click", () => { $("input").value = $("input").value.slice(0, -1); });
+  $("clear-log").addEventListener("click", () => { $("log").textContent = ""; $("empty").hidden = false; });
+  $("customer").addEventListener("change", resetSession);
+  document.querySelectorAll(".mode").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      state.mode = btn.dataset.mode;
+      document.querySelectorAll(".mode").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+    })
+  );
+
+  const [customers, merchantList] = await Promise.all([
+    fetch("/customers").then((r) => r.json()),
+    fetch("/merchants").then((r) => r.json()),
+  ]);
+  merchants = merchantList;
+  for (const c of customers) {
+    const opt = document.createElement("option");
+    opt.value = c.phone;
+    opt.textContent = `${c.name} · ${c.phone}`;
+    $("customer").append(opt);
+  }
+  resetSession();
+}
+
+init();
+</script>
+</body>
+</html>

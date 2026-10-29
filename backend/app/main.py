@@ -7,17 +7,27 @@ Step 1: /health
 Step 2: /customers, /merchants, /wallets
 Step 3: POST /payments, /transactions
 Step 5: idempotent replay of repeated payment requests
+Step 7: customer balance lookup + serves the USSD simulator at /simulator/
 """
 
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Customer, Merchant, Transaction, Wallet
-from app.schemas import CustomerOut, MerchantOut, PaymentRequest, TransactionOut, WalletOut
+from app.schemas import (
+    BalanceOut,
+    CustomerOut,
+    MerchantOut,
+    PaymentRequest,
+    TransactionOut,
+    WalletOut,
+)
 from app.services.payments import (
     KeyReuseMismatchError,
     NotFoundError,
@@ -46,6 +56,16 @@ def health() -> dict:
 def list_customers(db: Session = Depends(get_db)):
     """All simulated customers."""
     return db.query(Customer).order_by(Customer.customer_id).all()
+
+
+@app.get("/customers/{phone}/balance", response_model=BalanceOut)
+def customer_balance(phone: str, db: Session = Depends(get_db)):
+    """A customer's current wallet balance (used by the USSD 'Check balance' option)."""
+    customer = db.query(Customer).filter_by(phone=phone).first()
+    if customer is None:
+        raise HTTPException(status_code=404, detail=f"No customer with phone {phone}")
+    wallet = db.query(Wallet).filter_by(owner_type="CUSTOMER", owner_id=customer.customer_id).one()
+    return BalanceOut(name=customer.name, phone=customer.phone, balance=wallet.balance)
 
 
 @app.get("/merchants", response_model=list[MerchantOut])
@@ -131,3 +151,11 @@ def get_transaction(transaction_id: int, db: Session = Depends(get_db)):
     if txn is None:
         raise HTTPException(status_code=404, detail="Transaction not found")
     return txn
+
+
+# --- USSD simulator (Step 7) ----------------------------------------------------
+# The simulator is a plain web page (ussd-simulator/index.html at the project root).
+# FastAPI serves it at http://127.0.0.1:8000/simulator/ so it can call this API directly.
+SIMULATOR_DIR = Path(__file__).resolve().parents[2] / "ussd-simulator"
+if SIMULATOR_DIR.is_dir():
+    app.mount("/simulator", StaticFiles(directory=SIMULATOR_DIR, html=True), name="simulator")
