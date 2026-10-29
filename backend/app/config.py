@@ -14,6 +14,10 @@ DATABASE_URL = os.getenv(
     "postgresql+psycopg://payreliant:payreliant_dev@localhost:5432/payreliant",
 )
 
+# Concurrency control (Step 6). "true" = lock wallet rows during a payment (correct).
+# "false" = no locking: ONLY for the before/after experiment in experiments/race_demo.py.
+LOCK_WALLETS = os.getenv("LOCK_WALLETS", "true").lower() == "true"
+
 # A separate database used only by the automated tests,
 # so running pytest never touches your real sandbox data.
 TEST_DATABASE_URL = os.getenv(

@@ -4,6 +4,7 @@ services:
   db:
     image: postgres:16
     container_name: payreliant-db
+    restart: unless-stopped   # start automatically whenever Docker Desktop starts
     environment:
       POSTGRES_USER: payreliant
       POSTGRES_PASSWORD: payreliant_dev
@@ -16,6 +17,7 @@ services:
   redis:
     image: redis:7
     container_name: payreliant-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
 

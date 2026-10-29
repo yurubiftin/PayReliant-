@@ -60,6 +60,16 @@ pytest
 ```
 Docker must be running. Tests use a separate `payreliant_test` database, so they never touch your sandbox data.
 
+## Concurrency experiment (Scenario 4)
+
+```bash
+cd backend
+python -m experiments.race_demo                         # 50 payments, 3 rounds per mode
+python -m experiments.race_demo --payments 100 --rounds 5
+```
+Runs the same burst of simultaneous payments with wallet locking OFF and then ON,
+and prints a before/after table (lost updates, wallets vs ledger, time).
+
 ## Build progress
 
 - [x] Step 1 — Project setup, health endpoint, first test
@@ -67,7 +77,7 @@ Docker must be running. Tests use a separate `payreliant_test` database, so they
 - [x] Step 3 — Payment endpoint with atomic wallet + ledger updates
 - [x] Step 4 — Transaction states (PENDING → PROCESSING → SUCCESSFUL / FAILED)
 - [x] Step 5 — Idempotency (retries return the original result, never charge twice)
-- [ ] Step 6 — Concurrency control
+- [x] Step 6 — Concurrency control (row locks; before/after experiment in `backend/experiments/race_demo.py`)
 - [ ] Step 7 — USSD simulator
 - [ ] Step 8 — Merchant dashboard
 - [ ] Step 9 — Reliability and load tests

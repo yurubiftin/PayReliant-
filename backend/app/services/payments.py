@@ -9,13 +9,17 @@ This follows "Core Transaction Processing Logic" (proposal section 4.5):
   1. Identify the customer and merchant           -> 404 if either is unknown
   2. Record the transaction as PENDING            -> saved immediately
   3. Move it to PROCESSING
-  4. Check the customer has enough balance        -> FAILED if not, nothing moves
+  4. LOCK both wallets, then check the customer has enough balance
+                                                  -> FAILED if not, nothing moves
   5. Debit customer + credit merchant + write two ledger entries,
      all in ONE database transaction              -> all happen, or none happen
   6. Mark it SUCCESSFUL (or FAILED if anything went wrong)
 
-Not yet handled:
-  - Two DIFFERENT payments from the same wallet at the same instant -> Step 6
+Concurrency (Step 6):
+  Two DIFFERENT payments from the same wallet at the same instant would both read
+  the same old balance, and one deduction would be lost. Step 4 prevents this with
+  SELECT ... FOR UPDATE: the second payment WAITS until the first one commits, then
+  reads the new balance.
 """
 
 from dataclasses import dataclass
@@ -24,6 +28,7 @@ from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import config
 from app.models import Customer, LedgerEntry, Merchant, Transaction, Wallet
 
 
@@ -86,14 +91,9 @@ def process_payment(
     db.commit()
 
     try:
-        customer_wallet = db.query(Wallet).filter_by(
-            owner_type="CUSTOMER", owner_id=customer.customer_id
-        ).one()
-        merchant_wallet = db.query(Wallet).filter_by(
-            owner_type="MERCHANT", owner_id=merchant.merchant_id
-        ).one()
+        customer_wallet, merchant_wallet = _lock_wallets(db, customer, merchant)
 
-        # --- 4. Enough money? --------------------------------------------------
+        # --- 4. Enough money? (the balance read here is the latest, because we hold the lock)
         if customer_wallet.balance < amount:
             txn.status = "FAILED"
             txn.failure_reason = "INSUFFICIENT_BALANCE"
@@ -120,6 +120,30 @@ def process_payment(
         txn.failure_reason = "PROCESSING_ERROR"
         db.commit()
         raise
+
+
+def _lock_wallets(db: Session, customer: Customer, merchant: Merchant) -> tuple[Wallet, Wallet]:
+    """Fetch both wallets, LOCKING their rows until this payment commits or rolls back.
+
+    SELECT ... FOR UPDATE tells PostgreSQL: "I'm about to change these rows; anyone else
+    who wants to lock them must wait until I'm finished."
+
+    Both rows are locked in ONE query, ordered by wallet_id. Every payment therefore locks
+    wallets in the same order, which prevents deadlocks (payment A holding wallet 1 and
+    waiting for 4, while payment B holds 4 and waits for 1).
+    """
+    query = db.query(Wallet).filter(
+        ((Wallet.owner_type == "CUSTOMER") & (Wallet.owner_id == customer.customer_id))
+        | ((Wallet.owner_type == "MERCHANT") & (Wallet.owner_id == merchant.merchant_id))
+    ).order_by(Wallet.wallet_id)
+
+    if config.LOCK_WALLETS:
+        query = query.with_for_update()
+
+    wallets = query.all()
+    customer_wallet = next(w for w in wallets if w.owner_type == "CUSTOMER")
+    merchant_wallet = next(w for w in wallets if w.owner_type == "MERCHANT")
+    return customer_wallet, merchant_wallet
 
 
 def _replay(
