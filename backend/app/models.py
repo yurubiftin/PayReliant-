@@ -80,6 +80,11 @@ class Transaction(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
     failure_reason: Mapped[str | None] = mapped_column(String(200), default=None)
+    # Step 8 (dashboard metrics):
+    # how long the server took to process this payment, in milliseconds
+    processing_ms: Mapped[float | None] = mapped_column(default=None)
+    # how many duplicate requests with this key were blocked (replayed or told to wait)
+    replay_count: Mapped[int] = mapped_column(default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -120,4 +125,35 @@ class LedgerEntry(Base):
     __table_args__ = (
         CheckConstraint("amount > 0", name="ledger_amount_positive"),
         CheckConstraint("entry_type IN ('DEBIT', 'CREDIT')", name="valid_entry_type"),
+    )
+
+
+class User(Base):
+    """A dashboard login (Step 9a: authentication).
+
+    Two roles:
+      ADMIN    - operates the sandbox: sees everything, manages accounts and settings
+      MERCHANT - sees only their own merchant's transactions and wallet (merchant_id is set)
+
+    Passwords are NEVER stored. Only a one-way Argon2 hash is kept, so even someone who
+    reads the database cannot recover the password.
+    """
+
+    __tablename__ = "users"
+
+    user_id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(10))  # "ADMIN" or "MERCHANT"
+    merchant_id: Mapped[int | None] = mapped_column(ForeignKey("merchants.merchant_id"), default=None)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("role IN ('ADMIN', 'MERCHANT')", name="valid_role"),
+        # A merchant login must belong to a merchant; an admin must not.
+        CheckConstraint(
+            "(role = 'MERCHANT' AND merchant_id IS NOT NULL) OR (role = 'ADMIN' AND merchant_id IS NULL)",
+            name="merchant_link_matches_role",
+        ),
     )

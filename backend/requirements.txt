@@ -7,6 +7,11 @@ sqlalchemy          # talks to the database using Python classes instead of raw 
 psycopg[binary]     # the driver that actually connects Python to PostgreSQL
 python-dotenv       # reads settings from the .env file
 
+# Security (login)
+pyjwt               # signed login tokens (JWT)
+pwdlib[argon2]      # password hashing (Argon2): passwords are never stored
+python-multipart    # lets FastAPI read the login form
+
 # Testing
 pytest
 httpx2

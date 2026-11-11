@@ -22,6 +22,7 @@ Concurrency (Step 6):
   reads the new balance.
 """
 
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -57,6 +58,8 @@ def process_payment(
     existing = db.query(Transaction).filter_by(idempotency_key=idempotency_key).first()
     if existing is not None:
         return _replay(db, existing, customer_phone, merchant_code, amount)
+
+    started = time.perf_counter()  # to record how long processing takes (dashboard metric)
 
     # --- 1. Identify the customer and merchant --------------------------------
     customer = db.query(Customer).filter_by(phone=customer_phone).first()
@@ -97,6 +100,7 @@ def process_payment(
         if customer_wallet.balance < amount:
             txn.status = "FAILED"
             txn.failure_reason = "INSUFFICIENT_BALANCE"
+            txn.processing_ms = _elapsed_ms(started)
             db.commit()
             return PaymentResult(txn, replayed=False)
 
@@ -110,6 +114,7 @@ def process_payment(
 
         # --- 6. SUCCESSFUL -----------------------------------------------------
         txn.status = "SUCCESSFUL"
+        txn.processing_ms = _elapsed_ms(started)
         db.commit()
         return PaymentResult(txn, replayed=False)
 
@@ -118,8 +123,25 @@ def process_payment(
         db.rollback()
         txn.status = "FAILED"
         txn.failure_reason = "PROCESSING_ERROR"
+        txn.processing_ms = _elapsed_ms(started)
         db.commit()
         raise
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 2)
+
+
+def _count_blocked_duplicate(db: Session, txn: Transaction) -> None:
+    """Add 1 to this transaction's replay_count (shown as "Duplicates blocked" on the dashboard).
+
+    Done as `replay_count = replay_count + 1` inside the database, so two duplicates
+    arriving at once can't overwrite each other's count (the same lost-update idea as Step 6).
+    """
+    db.query(Transaction).filter_by(transaction_id=txn.transaction_id).update(
+        {Transaction.replay_count: Transaction.replay_count + 1}, synchronize_session=False
+    )
+    db.commit()
 
 
 def _lock_wallets(db: Session, customer: Customer, merchant: Merchant) -> tuple[Wallet, Wallet]:
@@ -160,6 +182,10 @@ def _replay(
         or existing.amount != amount
     ):
         raise KeyReuseMismatchError(existing.idempotency_key)
+
+    # From here on, this request is a genuine duplicate that we are blocking. Count it.
+    _count_blocked_duplicate(db, existing)
+    db.refresh(existing)  # re-read: the first request may have finished in the meantime
 
     # The first request hasn't finished yet. Don't start a second one; ask the client to wait.
     if existing.status in ("PENDING", "PROCESSING"):

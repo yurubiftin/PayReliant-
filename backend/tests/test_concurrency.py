@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func
 
 from app.main import app
+from tests.conftest import GATEWAY
 from app.models import LedgerEntry, Transaction, Wallet
 
 from tests.test_payments import AMINA, FAITH, MAMA_MBOGA, STARTING_TOTAL, balance, pay
@@ -23,7 +24,7 @@ def send_in_parallel(requests):
 
     def send(req):
         key, phone, code, amount = req
-        with TestClient(app) as c:
+        with TestClient(app, headers=GATEWAY) as c:
             return pay(c, key, phone, code, amount).json()["status"]
 
     with ThreadPoolExecutor(max_workers=len(requests)) as pool:

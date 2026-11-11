@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
+from app import config
 from app.config import DATABASE_URL, TEST_DATABASE_URL
 from app.database import Base, get_db
 from app.main import app
@@ -44,9 +45,19 @@ def db():
     session.close()
 
 
+GATEWAY = {"X-API-Key": config.GATEWAY_API_KEY}
+
+
+def login(test_client, username, password):
+    """Log in and return the Authorization header for that user."""
+    r = test_client.post("/auth/login", data={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
 @pytest.fixture
-def client(db):
-    """An API client whose requests use the test database."""
+def anon_client(db):
+    """An API client with NO login and NO API key, using the test database."""
 
     def _get_test_db():
         session = TestSession()
@@ -58,3 +69,20 @@ def client(db):
     app.dependency_overrides[get_db] = _get_test_db
     yield TestClient(app)
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def client(anon_client):
+    """The default client for most tests: logged in as ADMIN and carrying the gateway API key,
+    so it may call every endpoint (like the sandbox operator testing their own system)."""
+    anon_client.headers.update(GATEWAY)
+    anon_client.headers.update(login(anon_client, "admin", config.ADMIN_PASSWORD))
+    return anon_client
+
+
+@pytest.fixture
+def merchant_client(anon_client):
+    """A client logged in as the Mama Mboga Grocers merchant (merchant_id 1)."""
+    c = TestClient(app)  # its own client, sharing the test-database setup from anon_client
+    c.headers.update(login(c, "mamamboga", config.DEMO_MERCHANT_PASSWORD))
+    return c

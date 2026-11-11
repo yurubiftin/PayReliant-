@@ -63,7 +63,7 @@ def run_once(engine, Session, n_payments: int, lock: bool) -> dict:
     app.dependency_overrides[get_db] = _db
 
     def send(i):
-        with TestClient(app) as c:
+        with TestClient(app, headers={"X-API-Key": config.GATEWAY_API_KEY}) as c:
             r = c.post(
                 "/payments",
                 json={"customer_phone": AMINA_PHONE, "merchant_code": "52011", "amount": str(AMOUNT)},

@@ -10,6 +10,7 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.conftest import GATEWAY
 from app.models import LedgerEntry, Transaction
 
 from tests.test_payments import AMINA, FAITH, MAMA_MBOGA, balance, pay
@@ -72,7 +73,7 @@ def test_ten_identical_requests_at_the_same_instant_charge_once(client, db):
     """The hardest case: duplicates arriving simultaneously, not one after another."""
 
     def send(_):
-        with TestClient(app) as c:  # each thread acts as a separate phone/connection
+        with TestClient(app, headers=GATEWAY) as c:  # each thread acts as a separate phone/connection
             return pay(c, "burst-key", AMINA, MAMA_MBOGA, "500.00").status_code
 
     with ThreadPoolExecutor(max_workers=10) as pool:

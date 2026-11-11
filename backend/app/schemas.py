@@ -26,6 +26,7 @@ class MerchantOut(BaseModel):
     name: str
     business_code: str
     status: str
+    login_username: str | None = None  # filled in for admins only
 
 
 class WalletOut(BaseModel):
@@ -77,5 +78,58 @@ class TransactionOut(BaseModel):
     amount: Decimal
     status: str
     failure_reason: str | None
+    processing_ms: float | None
+    replay_count: int
     created_at: datetime
+    updated_at: datetime
     ledger_entries: list[LedgerEntryOut]
+
+
+class StatsOut(BaseModel):
+    """Headline numbers for the dashboard (Step 8)."""
+
+    total_transactions: int
+    successful: int
+    failed: int
+    pending: int  # PENDING or PROCESSING right now
+    success_rate: float | None  # % of finished transactions that succeeded
+    avg_processing_ms: float | None
+    duplicates_blocked: int
+    volume_successful: Decimal  # total KES moved by successful payments
+    ledger_balanced: bool  # total DEBITs == total CREDITs
+
+
+# --- Step 9a: authentication and account management --------------------------------
+
+class UserOut(BaseModel):
+    """Who is logged in (returned by /auth/login and /auth/me)."""
+
+    username: str
+    role: str  # "ADMIN" or "MERCHANT"
+    merchant_id: int | None
+    merchant_name: str | None
+
+
+class LoginOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
+class CustomerCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=100, examples=["Wanjiku M."])
+    # Kenyan mobile number in international format: 254 + 7xx or 1xx + 6 digits
+    phone: str = Field(pattern=r"^254(7|1)\d{8}$", examples=["254712000220"])
+    initial_balance: Decimal = Field(ge=0, max_digits=12, decimal_places=2, examples=["5000.00"])
+
+
+class MerchantCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=100, examples=["Duka La Mama"])
+    business_code: str = Field(pattern=r"^\d{5}$", examples=["52014"])
+    # The merchant's dashboard login
+    username: str = Field(pattern=r"^[a-z0-9_]{3,30}$", examples=["dukalamama"])
+    password: str = Field(min_length=8, max_length=100)
+
+
+class StatusUpdate(BaseModel):
+    status: str = Field(pattern=r"^(ACTIVE|SUSPENDED)$")
