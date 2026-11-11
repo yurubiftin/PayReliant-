@@ -11,13 +11,20 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import DATABASE_URL
 
-engine = create_engine(DATABASE_URL)
+# pool_size: how many database connections are kept open. Raised from the default (5) because
+# reliability tests and load tests send many payments at once.
+engine = create_engine(DATABASE_URL, pool_size=20, max_overflow=20)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False)
 
 
 class Base(DeclarativeBase):
     pass
+
+
+def get_session_factory():
+    """For code that opens its OWN sessions (e.g. reliability tests running payments in parallel)."""
+    return SessionLocal
 
 
 def get_db():

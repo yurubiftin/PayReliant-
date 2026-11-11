@@ -15,3 +15,6 @@ python-multipart    # lets FastAPI read the login form
 # Testing
 pytest
 httpx2
+
+# Load testing (Step 10)
+locust

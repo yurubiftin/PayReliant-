@@ -22,6 +22,7 @@ Concurrency (Step 6):
   reads the new balance.
 """
 
+import random
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -31,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.models import Customer, LedgerEntry, Merchant, Transaction, Wallet
+from app.services.sandbox_settings import get_settings
 
 
 class NotFoundError(Exception):
@@ -45,6 +47,10 @@ class KeyReuseMismatchError(Exception):
     """The key was already used for a DIFFERENT payment (other amount/customer/merchant)."""
 
 
+class SimulatedFailure(Exception):
+    """A failure injected ON PURPOSE (Settings > Failure injection) to test that the system fails safely."""
+
+
 @dataclass
 class PaymentResult:
     transaction: Transaction
@@ -52,8 +58,20 @@ class PaymentResult:
 
 
 def process_payment(
-    db: Session, *, idempotency_key: str, customer_phone: str, merchant_code: str, amount: Decimal
+    db: Session,
+    *,
+    idempotency_key: str,
+    customer_phone: str,
+    merchant_code: str,
+    amount: Decimal,
+    inject_failure: bool | None = None,
+    inject_latency_ms: float | None = None,
 ) -> PaymentResult:
+    """Process one payment.
+
+    inject_failure / inject_latency_ms: used by the reliability tests to force a failure or a delay.
+    When left as None, the values from the Settings screen apply (failure rate %, added latency).
+    """
     # --- 0. Idempotency check --------------------------------------------------
     existing = db.query(Transaction).filter_by(idempotency_key=idempotency_key).first()
     if existing is not None:
@@ -93,6 +111,14 @@ def process_payment(
     txn.status = "PROCESSING"
     db.commit()
 
+    # Failure / latency injection (Settings screen, or forced by a reliability test).
+    settings = get_settings(db)
+    latency_ms = settings.added_latency_ms if inject_latency_ms is None else inject_latency_ms
+    fail_on_purpose = (random.random() * 100 < settings.failure_rate_pct
+                       if inject_failure is None else inject_failure)
+    if latency_ms:
+        time.sleep(latency_ms / 1000)  # a slow payment service (before any wallet is locked)
+
     try:
         customer_wallet, merchant_wallet = _lock_wallets(db, customer, merchant)
 
@@ -112,8 +138,22 @@ def process_payment(
         db.add(LedgerEntry(transaction_id=txn.transaction_id, wallet_id=merchant_wallet.wallet_id,
                            entry_type="CREDIT", amount=amount))
 
+        # Injected failure: the customer is ALREADY debited (in this unsaved transaction) when it
+        # strikes. The rollback below must undo that, so no money is lost: atomicity, proven.
+        if fail_on_purpose:
+            db.flush()  # send the debit/credit/ledger changes to PostgreSQL (still not committed)
+            raise SimulatedFailure()
+
         # --- 6. SUCCESSFUL -----------------------------------------------------
         txn.status = "SUCCESSFUL"
+        txn.processing_ms = _elapsed_ms(started)
+        db.commit()
+        return PaymentResult(txn, replayed=False)
+
+    except SimulatedFailure:
+        db.rollback()  # undoes the debit, the credit and both ledger entries
+        txn.status = "FAILED"
+        txn.failure_reason = "SIMULATED_FAILURE"
         txn.processing_ms = _elapsed_ms(started)
         db.commit()
         return PaymentResult(txn, replayed=False)

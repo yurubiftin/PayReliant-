@@ -8,7 +8,10 @@ Who can call what (proposal 3.1.3 "Security"):
   USSD gateway    POST /payments (needs the X-API-Key header)
   admin           everything, including creating and suspending accounts
   merchant        only their OWN transactions, wallet and stats
+  admin only      /settings, /reliability (Step 9b)
 """
+
+import logging
 
 from pathlib import Path
 from typing import Annotated
@@ -21,8 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models import Customer, LedgerEntry, Merchant, Transaction, User, Wallet
+from app.database import get_db, get_session_factory
+from app.models import Customer, LedgerEntry, Merchant, ReliabilityRun, Transaction, User, Wallet
 from app.schemas import (
     BalanceOut,
     CustomerCreate,
@@ -31,6 +34,10 @@ from app.schemas import (
     MerchantCreate,
     MerchantOut,
     PaymentRequest,
+    PublicSettingsOut,
+    ReliabilityRunOut,
+    SettingsOut,
+    SettingsUpdate,
     StatsOut,
     StatusUpdate,
     TransactionOut,
@@ -53,6 +60,16 @@ from app.services.payments import (
     PaymentInProgressError,
     process_payment,
 )
+from app.services.reliability import SCENARIOS, run_scenario
+from app.services.sandbox_settings import get_settings
+
+# "Session logging" (Settings screen): one line per payment in the API terminal.
+log = logging.getLogger("payreliant.payments")
+log.setLevel(logging.INFO)
+if not log.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s  PAYMENT  %(message)s", "%H:%M:%S"))
+    log.addHandler(_handler)
 
 app = FastAPI(
     title="PayReliant API",
@@ -61,7 +78,7 @@ app = FastAPI(
         "**To try protected endpoints here:** click **Authorize**, log in with a username and "
         "password (e.g. `admin`), and/or enter the gateway API key for `/payments`."
     ),
-    version="0.9.0",
+    version="0.10.0",
 )
 
 # The dashboard runs on its own address (http://localhost:5173 during development).
@@ -69,7 +86,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET", "POST", "PATCH"],
+    allow_methods=["GET", "POST", "PATCH", "PUT"],
     allow_headers=["Content-Type", "Authorization", "Idempotency-Key", "X-API-Key"],
     expose_headers=["Idempotent-Replayed", "Retry-After"],
 )
@@ -264,6 +281,13 @@ def create_payment(
         )
 
     txn = result.transaction
+    if get_settings(db).session_logging:
+        if result.replayed:
+            log.info("key=%s  DUPLICATE blocked, original result replayed (%s)", idempotency_key, txn.status)
+        else:
+            reason = f" ({txn.failure_reason})" if txn.failure_reason else ""
+            log.info("key=%s  %s -> %s  KES %s  %s%s  %sms", idempotency_key, payment.customer_phone,
+                     payment.merchant_code, payment.amount, txn.status, reason, txn.processing_ms)
     body = TransactionOut.model_validate(txn).model_dump(mode="json")
     # Same status code every time for the same key: 201 if it succeeded, 422 if it failed.
     status_code = 201 if txn.status == "SUCCESSFUL" else 422
@@ -325,6 +349,58 @@ def stats(user: AnyUser, db: Session = Depends(get_db)):
         .with_entities(func.coalesce(func.sum(Transaction.amount), 0)).scalar(),
         ledger_balanced=debits == credits,
     )
+
+
+# --- Settings (Step 9b) ---------------------------------------------------------
+
+@app.get("/settings", response_model=SettingsOut, tags=["settings"])
+def read_settings(_: AdminUser, db: Session = Depends(get_db)):
+    """All sandbox settings, including failure injection. (Admin only.)"""
+    return get_settings(db)
+
+
+@app.put("/settings", response_model=SettingsOut, tags=["settings"])
+def update_settings(body: SettingsUpdate, _: AdminUser, db: Session = Depends(get_db)):
+    """Change sandbox settings. Send only the fields you want to change. (Admin only.)
+
+    `failure_rate_pct` and `added_latency_ms` affect REAL payments (simulator, API) straight away,
+    so you can watch the system fail safely. Set them back to 0 afterwards.
+    """
+    settings = get_settings(db)
+    for field, value in body.model_dump(exclude_unset=True).items():
+        if value is not None:
+            setattr(settings, field, value)
+    db.commit()
+    db.refresh(settings)
+    return settings
+
+
+@app.get("/settings/public", response_model=PublicSettingsOut, tags=["settings"])
+def read_public_settings(_: Annotated[User | None, Depends(gateway_or_user)], db: Session = Depends(get_db)):
+    """What the USSD simulator needs: provider name, client timeout and retry attempts."""
+    return get_settings(db)
+
+
+# --- Reliability tests (Step 9b) -------------------------------------------------
+
+@app.post("/reliability/run/{scenario}", response_model=ReliabilityRunOut, tags=["reliability"])
+def run_reliability_test(scenario: str, _: AdminUser, db: Session = Depends(get_db),
+                         factory=Depends(get_session_factory)):
+    """Run one reliability test: `duplicate`, `timeout`, `failed` or `concurrent`. (Admin only.)
+
+    Sends `max_requests_per_test` payments (Settings) through the real payment logic in parallel,
+    using two dedicated test accounts, then checks that every shilling is accounted for.
+    """
+    if scenario not in SCENARIOS:
+        raise HTTPException(status_code=404, detail=f"Unknown test. Choose one of: {', '.join(SCENARIOS)}")
+    return run_scenario(db, factory, scenario)
+
+
+@app.get("/reliability/runs", response_model=list[ReliabilityRunOut], tags=["reliability"])
+def list_reliability_runs(_: AdminUser, limit: Annotated[int, Query(ge=1, le=200)] = 20,
+                          db: Session = Depends(get_db)):
+    """Recent reliability test results, newest first. (Admin only.)"""
+    return db.query(ReliabilityRun).order_by(ReliabilityRun.run_id.desc()).limit(limit).all()
 
 
 # --- USSD simulator (Step 7) ----------------------------------------------------

@@ -133,3 +133,58 @@ class MerchantCreate(BaseModel):
 
 class StatusUpdate(BaseModel):
     status: str = Field(pattern=r"^(ACTIVE|SUSPENDED)$")
+
+
+# --- Step 9b: sandbox settings and reliability tests -------------------------------
+
+class PublicSettingsOut(BaseModel):
+    """The settings a client (the USSD simulator) needs: no secrets, nothing an attacker could use."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    provider_name: str
+    client_timeout_s: float
+    retry_attempts: int
+
+
+class SettingsOut(PublicSettingsOut):
+    currency: str
+    session_logging: bool
+    max_requests_per_test: int
+    failure_rate_pct: float
+    added_latency_ms: int
+    updated_at: datetime | None
+
+
+class SettingsUpdate(BaseModel):
+    """Every field is optional: send only what you want to change. Ranges keep the sandbox usable."""
+
+    provider_name: str | None = Field(default=None, min_length=2, max_length=60)
+    client_timeout_s: float | None = Field(default=None, ge=0.1, le=10)
+    session_logging: bool | None = None
+    max_requests_per_test: int | None = Field(default=None, ge=10, le=500)
+    retry_attempts: int | None = Field(default=None, ge=0, le=10)
+    failure_rate_pct: float | None = Field(default=None, ge=0, le=100)
+    added_latency_ms: int | None = Field(default=None, ge=0, le=5000)
+
+
+class CheckOut(BaseModel):
+    name: str
+    passed: bool
+    detail: str
+
+
+class ReliabilityRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    run_id: int
+    scenario: str
+    requests: int
+    passed: int
+    failed: int
+    status: str
+    duration_ms: float
+    p95_ms: float | None
+    checks: list[CheckOut]
+    summary: str
+    created_at: datetime

@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     CheckConstraint,
+    JSON,
     DateTime,
     ForeignKey,
     Numeric,
@@ -157,3 +158,50 @@ class User(Base):
             name="merchant_link_matches_role",
         ),
     )
+
+
+class SandboxSettings(Base):
+    """Sandbox settings (Step 9b), edited by the admin on the Settings screen. Always exactly one row (id 1).
+
+    Every value here really changes behaviour:
+      provider_name          shown on the USSD simulator's menu screen
+      client_timeout_s       how long a client waits for a reply before retrying (timeout test, simulator)
+      session_logging        when on, the API prints one line per payment to its terminal
+      max_requests_per_test  how many requests each reliability test sends
+      retry_attempts         how many times a client retries after a timeout (timeout test, simulator)
+      failure_rate_pct       % of real payments that fail ON PURPOSE mid-transaction (failure injection)
+      added_latency_ms       extra delay added to every real payment (latency injection)
+    """
+
+    __tablename__ = "sandbox_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider_name: Mapped[str] = mapped_column(String(60), default="PayReliant Sandbox")
+    currency: Mapped[str] = mapped_column(String(3), default="KES")
+    client_timeout_s: Mapped[float] = mapped_column(default=0.5)
+    session_logging: Mapped[bool] = mapped_column(default=True)
+    max_requests_per_test: Mapped[int] = mapped_column(default=100)
+    retry_attempts: Mapped[int] = mapped_column(default=3)
+    failure_rate_pct: Mapped[float] = mapped_column(default=0.0)
+    added_latency_ms: Mapped[int] = mapped_column(default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ReliabilityRun(Base):
+    """The result of one reliability test run from the Reliability Tests screen (Step 9b)."""
+
+    __tablename__ = "reliability_runs"
+
+    run_id: Mapped[int] = mapped_column(primary_key=True)
+    scenario: Mapped[str] = mapped_column(String(20))  # duplicate | timeout | failed | concurrent
+    requests: Mapped[int] = mapped_column()
+    passed: Mapped[int] = mapped_column()   # requests whose outcome was correct and safe
+    failed: Mapped[int] = mapped_column()   # requests whose outcome was wrong or unsafe
+    status: Mapped[str] = mapped_column(String(10))  # PASSED if every consistency check held
+    duration_ms: Mapped[float] = mapped_column()
+    p95_ms: Mapped[float | None] = mapped_column(default=None)
+    checks: Mapped[list] = mapped_column(JSON)  # [{"name": ..., "passed": bool, "detail": ...}]
+    summary: Mapped[str] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

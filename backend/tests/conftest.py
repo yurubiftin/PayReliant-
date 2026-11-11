@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import config
 from app.config import DATABASE_URL, TEST_DATABASE_URL
-from app.database import Base, get_db
+from app.database import Base, get_db, get_session_factory
 from app.main import app
 from app.seed import seed_sample_data
 
@@ -30,7 +30,7 @@ def _create_test_database_if_missing() -> None:
 
 
 _create_test_database_if_missing()
-test_engine = create_engine(TEST_DATABASE_URL)
+test_engine = create_engine(TEST_DATABASE_URL, pool_size=20, max_overflow=20)
 TestSession = sessionmaker(bind=test_engine, autoflush=False)
 
 
@@ -67,6 +67,7 @@ def anon_client(db):
             session.close()
 
     app.dependency_overrides[get_db] = _get_test_db
+    app.dependency_overrides[get_session_factory] = lambda: TestSession
     yield TestClient(app)
     app.dependency_overrides.clear()
 
