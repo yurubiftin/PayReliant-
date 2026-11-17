@@ -1,0 +1,52 @@
+# Continuous integration (Step 10): GitHub runs this on every push and pull request.
+# A green tick on GitHub = all backend tests passed and the dashboard builds.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      # A throwaway PostgreSQL, same version and login as docker-compose.yml
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: payreliant
+          POSTGRES_PASSWORD: payreliant_dev
+          POSTGRES_DB: payreliant
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U payreliant"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Run the test suite
+        run: pytest -v
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - name: Build the dashboard
+        run: npm run build

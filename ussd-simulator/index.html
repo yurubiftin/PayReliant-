@@ -17,6 +17,10 @@
 
   Served by FastAPI at http://127.0.0.1:8000/simulator/  (same address as the API,
   so the page can call /payments, /merchants etc. directly).
+
+  Security: like a real USSD gateway, it identifies itself to the API with an API key
+  (X-API-Key header). In production that key would live on the gateway's server, never in a
+  browser page; here it is a visible field because this is a local sandbox.
 -->
 <style>
   :root {
@@ -91,6 +95,10 @@
     <label class="field">Simulated customer (phone)
       <select id="customer"></select>
     </label>
+    <label class="field">Gateway API key
+      <input id="api-key" value="sk_sandbox_ussd_gateway" autocomplete="off" spellcheck="false"
+             style="min-height:42px;padding:0 10px;border:1px solid #CBD0C9;border-radius:8px;font:13px var(--mono);width:230px">
+    </label>
     <div class="field" style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)">
       Network condition for the next payment
       <div class="modes" role="group" aria-label="Network condition">
@@ -144,8 +152,21 @@ const state = {
   resultText: "",
 };
 let merchants = [];    // loaded from GET /merchants
+// From the dashboard's Settings screen (GET /settings/public), reloaded before every payment.
+let sandbox = { provider_name: "PayReliant", client_timeout_s: 1.5, retry_attempts: 3 };
+
+async function loadSandboxSettings() {
+  try {
+    const r = await apiFetch("/settings/public");
+    if (r.ok) sandbox = await r.json();
+  } catch { /* keep the defaults */ }
+}
 
 const $ = (id) => document.getElementById(id);
+
+/* Every call to the API identifies the simulator as the USSD gateway. */
+const apiFetch = (path, options = {}) =>
+  fetch(path, { ...options, headers: { ...(options.headers || {}), "X-API-Key": $("api-key").value } });
 const phoneNumber = () => $("customer").value;
 
 /* ------------------------------------------------------------------------------
@@ -159,7 +180,7 @@ function merchantName(code) {
 function render() {
   const screens = {
     dial:     ["DIALLER", "Type the short code *384#\nand press Send."],
-    menu:     ["PAYRELIANT", "1. Pay merchant\n2. Check balance"],
+    menu:     [sandbox.provider_name.toUpperCase(), "1. Pay merchant\n2. Check balance"],
     merchant: ["PAY MERCHANT", "Enter merchant code:\n(try 52011, 52012, 52013)"],
     amount:   ["PAY MERCHANT", "Enter amount (KES):"],
     confirm:  ["CONFIRM", `Pay KES ${Number(state.amount).toLocaleString()} to\n${merchantName(state.merchantCode)} (${state.merchantCode})?\n\nEnter your 4-digit PIN:`],
@@ -206,7 +227,7 @@ function showResult(text) {
 }
 
 async function showBalance() {
-  const r = await fetch(`/customers/${phoneNumber()}/balance`);
+  const r = await apiFetch(`/customers/${phoneNumber()}/balance`);
   const b = await r.json();
   showResult(r.ok ? `${b.name}\nBalance: KES ${Number(b.balance).toLocaleString(undefined, {minimumFractionDigits: 2})}` : "Could not get balance.");
 }
@@ -220,6 +241,8 @@ async function pay() {
   const payload = { customer_phone: phoneNumber(), merchant_code: state.merchantCode, amount: state.amount };
 
   $("phone").classList.add("busy");
+  await loadSandboxSettings();  // timeout + retry attempts as set on the Settings screen
+  const waitMs = Math.max(sandbox.client_timeout_s * 1000, 300);
   let final;
   try {
     if (state.mode === "normal") {
@@ -236,14 +259,15 @@ async function pay() {
     } else if (state.mode === "timeout") {
       // The server receives and processes the payment, but the reply never reaches the phone.
       await post(key, payload, "POST /payments", { replyLost: true });
-      await sleep(1500);          // phone waits, hears nothing...
+      await sleep(waitMs);        // phone waits "Default Transaction Timeout", hears nothing...
       final = await post(key, payload, "POST /payments  (retry, same key)");
     }
 
-    // 409 = "the first request with this key is still being processed": wait and ask again.
-    if (final.code === 409) {
-      await sleep(1000);
-      final = await post(key, payload, "POST /payments  (retry after 409)");
+    // 409 = "the first request with this key is still being processed": wait and ask again,
+    // up to "Retry Attempts" times (Settings).
+    for (let attempt = 1; final.code === 409 && attempt <= sandbox.retry_attempts; attempt++) {
+      await sleep(waitMs);
+      final = await post(key, payload, `POST /payments  (retry ${attempt} after 409, same key)`);
     }
   } catch (err) {
     showResult("Network error. Is the API running?");
@@ -254,10 +278,11 @@ async function pay() {
 
   const t = final.body;
   if (t.status === "SUCCESSFUL") {
-    const bal = await (await fetch(`/customers/${phoneNumber()}/balance`)).json();
+    const bal = await (await apiFetch(`/customers/${phoneNumber()}/balance`)).json();
     showResult(`Confirmed. TXN-${t.transaction_id}\nKES ${Number(t.amount).toLocaleString()} paid to\n${merchantName(state.merchantCode)}.\nNew balance: KES ${Number(bal.balance).toLocaleString(undefined, {minimumFractionDigits: 2})}`);
   } else if (t.status === "FAILED") {
-    showResult(t.failure_reason === "INSUFFICIENT_BALANCE" ? "Payment failed.\nInsufficient balance." : "Payment failed.");
+    showResult(t.failure_reason === "INSUFFICIENT_BALANCE" ? "Payment failed.\nInsufficient balance."
+      : t.failure_reason === "SIMULATED_FAILURE" ? "Payment failed.\n(Injected failure: you were\nNOT charged.)" : "Payment failed.");
   } else {
     showResult("Payment not completed:\n" + (t.detail || "unknown error"));
   }
@@ -265,7 +290,7 @@ async function pay() {
 
 /* Send one POST /payments and log it. */
 async function post(key, payload, label, { replyLost = false } = {}) {
-  const r = await fetch("/payments", {
+  const r = await apiFetch("/payments", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": key },
     body: JSON.stringify(payload),
@@ -298,6 +323,8 @@ function addLog(label, key, result, replyLost) {
     note = `Key already seen: server returned the ORIGINAL result (TXN-${body.transaction_id}). No second charge.`;
   } else if (code === 201) {
     note = `New payment TXN-${body.transaction_id}. Customer debited, merchant credited, 2 ledger entries.`;
+  } else if (code === 401) {
+    note = "Rejected: missing or invalid gateway API key. No payment was attempted.";
   } else if (code === 409) {
     note = "Same key still being processed. Server says: retry shortly.";
   } else if (body.status === "FAILED") {
@@ -358,10 +385,16 @@ async function init() {
   );
 
   const [customers, merchantList] = await Promise.all([
-    fetch("/customers").then((r) => r.json()),
-    fetch("/merchants").then((r) => r.json()),
+    apiFetch("/customers").then((r) => r.json()),
+    apiFetch("/merchants").then((r) => r.json()),
   ]);
+  if (!Array.isArray(customers) || !Array.isArray(merchantList)) {
+    $("screen-tag").textContent = "ERROR";
+    $("screen-text").textContent = "The API refused the gateway API key.\nCheck the key and reload.";
+    return;
+  }
   merchants = merchantList;
+  await loadSandboxSettings();
   for (const c of customers) {
     const opt = document.createElement("option");
     opt.value = c.phone;
